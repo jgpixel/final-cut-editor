@@ -3,12 +3,15 @@ from fractions import Fraction
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 from build_clean_edit import apply_ranges
 from fcpxml_tools import load_timeline, time_value, validate_xml, xml_time
-from generate_subtitles import add_subtitles, layout_for, read_style, source_identity_matches, wrap_words, width_units
+from generate_subtitles import add_subtitles, analysis_for, layout_for, read_style, source_identity_matches, wrap_words, width_units, group_words, analysis_words
+from analyze_recording import DEFAULT_MODEL, DEFAULT_LANGUAGE, ASR_PROFILE, passage_rows, recognition_windows
 from subtitle_timing import connected_subtitles, subtitle_data, title_text
 
 
@@ -168,6 +171,89 @@ class SubtitleTests(unittest.TestCase):
         self.assertFalse(source_identity_matches(data, source))
         with self.assertRaisesRegex(ValueError, 'Stale'):
             add_subtitles(xml, read_style(), explicit=[analysis])
+
+    def test_automatic_cache_selection_requires_default_model_even_if_old_model_is_newer(self):
+        source = (self.directory / 'source.mov').resolve()
+        source.write_bytes(b'fixture')
+        stat = source.stat()
+        identity = {'source': str(source), 'size': stat.st_size,
+                    'mtime_ns': stat.st_mtime_ns, 'ctime_ns': stat.st_ctime_ns}
+        cache = self.directory / '.cache' / 'analysis'
+        cache.mkdir(parents=True)
+        turbo = cache / ('a' * 64 + '.json')
+        small = cache / ('b' * 64 + '.json')
+        for path, model in ((turbo, DEFAULT_MODEL), (small, 'small.en')):
+            path.write_text(json.dumps({'source': str(source), 'coordinate_space': 'file_seconds',
+                'identity': {**identity, 'settings': {'model': model, 'language': DEFAULT_LANGUAGE,
+                                                     'word_timestamps': True, 'asr_profile': ASR_PROFILE}}}))
+        with patch('generate_subtitles.ROOT', self.directory), patch('generate_subtitles.subprocess.run') as process:
+            data, path = analysis_for(str(source), [])
+            self.assertEqual(path, str(turbo))
+            self.assertEqual(data['identity']['settings']['model'], DEFAULT_MODEL)
+            process.assert_not_called()
+            turbo.unlink()
+            process.side_effect = RuntimeError('New transcription required')
+            with self.assertRaisesRegex(RuntimeError, 'New transcription required'):
+                analysis_for(str(source), [])
+
+    def test_new_profile_does_not_reuse_unbounded_turbo_transcript(self):
+        source = (self.directory / 'source.mov').resolve()
+        source.write_bytes(b'fixture')
+        stat = source.stat()
+        cache = self.directory / '.cache' / 'analysis'
+        cache.mkdir(parents=True)
+        (cache / ('c' * 64 + '.json')).write_text(json.dumps({'source': str(source),
+            'coordinate_space': 'file_seconds', 'identity': {'source': str(source),
+            'size': stat.st_size, 'mtime_ns': stat.st_mtime_ns, 'ctime_ns': stat.st_ctime_ns,
+            'settings': {'model': DEFAULT_MODEL, 'language': DEFAULT_LANGUAGE, 'word_timestamps': True}}}))
+        with patch('generate_subtitles.ROOT', self.directory), patch('generate_subtitles.subprocess.run',
+                side_effect=RuntimeError('New profile needed')):
+            with self.assertRaisesRegex(RuntimeError, 'New profile needed'):
+                analysis_for(str(source), [])
+
+    def test_natural_phrase_boundaries_preserve_clauses_and_words(self):
+        style = read_style()
+        layout = layout_for(1920, 1080, style)
+        for text, expected in [
+            ("Let's get to our starting location make sure there's no tree around me",
+             ["Let's get to our starting location", "make sure there's no tree around me"]),
+            ("line up with the center here we'll make our dive",
+             ['line up with the center here', "we'll make our dive"]),
+        ]:
+            words = [{'word': word, 'start': i * 0.18, 'end': (i + 1) * 0.18}
+                     for i, word in enumerate(text.split())]
+            groups = group_words(words, layout, style)
+            self.assertEqual([' '.join(w['word'] for w in group) for group in groups], expected)
+            self.assertEqual([w for group in groups for w in group], words)
+
+    def test_speech_boundary_is_hard_even_when_word_timestamps_touch(self):
+        words = [{'word': word, 'start': i * 0.2, 'end': (i + 1) * 0.2,
+                  'passage_id': 0 if i < 2 else 1}
+                 for i, word in enumerate(["let's", 'go', "that's", 'not', 'good'])]
+        groups = group_words(words, layout_for(1920, 1080, read_style()), read_style())
+        self.assertEqual([' '.join(w['word'] for w in g) for g in groups], ["let's go", "that's not good"])
+
+    def test_recognizer_words_are_clamped_to_actual_audio_window(self):
+        passages = [{'start': 81.0, 'end': 82.2}, {'start': 93.5, 'end': 94.8}]
+        segments = [SimpleNamespace(seek=9350, words=[
+            SimpleNamespace(start=81.7, end=93.8, word=" that's", probability=0.9),
+            SimpleNamespace(start=94, end=95.5, word=' good', probability=0.9)])]
+        row = passage_rows(segments, passages)[0]
+        self.assertEqual(row['passage_id'], 1)
+        self.assertEqual(row['words'][0]['start'], 93.5)
+        self.assertEqual(row['words'][-1]['end'], 94.8)
+        with self.assertRaisesRegex(ValueError, 'unknown speech passage'):
+            passage_rows([SimpleNamespace(seek=8200, words=[])], passages)
+
+    def test_shared_context_preserves_real_silence_and_caption_speech_boundaries(self):
+        speech = [{'start': 0, 'end': 2}, {'start': 3, 'end': 4}, {'start': 8, 'end': 10}]
+        self.assertEqual(recognition_windows(speech), [{'start': 0, 'end': 4}, {'start': 8, 'end': 10}])
+        data = {'speech_passages': speech, 'segments': [{'passage_id': 0, 'passage_start': 0,
+            'passage_end': 4, 'words': [{'word': 'First', 'start': 1, 'end': 2},
+                                      {'word': 'Second', 'start': 3, 'end': 4}]}]}
+        words = analysis_words(data)
+        self.assertEqual([w['passage_id'] for w in words], [0, 1])
+        self.assertEqual([w['passage_end'] for w in words], [2, 4])
 
     def test_vertical_horizontal_square_resolution_and_long_words(self):
         style = read_style()

@@ -16,6 +16,7 @@ import xml.etree.ElementTree as ET
 
 from fcpxml_tools import ROOT, load_timeline, media_path, time_value, xml_time, validate_xml, write_json, serialize_xml
 from subtitle_timing import insert_connected, is_subtitle, set_subtitle_data
+from analyze_recording import DEFAULT_MODEL, DEFAULT_LANGUAGE, ASR_PROFILE
 
 SUBTITLE_UID = '.../Titles.localized/Subtitles.localized/Subtitle.localized/Subtitle.moti'
 BASIC_UID = '.../Titles.localized/Bumper:Opener.localized/Basic Title.localized/Basic Title.moti'
@@ -88,7 +89,7 @@ def layout_for(width, height, style):
     font_pixels = min(font_pixels, usable / 2, height * 0.12)
     return {'orientation': 'vertical' if vertical else 'horizontal', 'width': width, 'height': height,
             'side_margin': side, 'bottom_margin': bottom, 'font_pixels': round(font_pixels, 4),
-            'usable_width': usable, 'max_words': style['max_words'] or (5 if vertical else 8),
+            'usable_width': usable, 'max_words': int(style['max_words'] or (5 if vertical else 8)),
             'max_lines': int(style['max_lines']), 'sizing': 'heuristic; human reviewed'}
 
 
@@ -128,20 +129,82 @@ def wrap_words(words, layout):
 
 
 def group_words(words, layout, style):
-    groups, group = [], []
+    blocks, block = [], []
     for word in words:
-        candidate = group + [word]
-        if group and (len(candidate) > layout['max_words'] or
-                      time_value(word['end']) - time_value(group[0]['start']) > time_value(style['max_duration']) or
-                      time_value(word['start']) - time_value(group[-1]['end']) > time_value(style['phrase_gap']) or
-                      re.search(r'[.!?]["\u201d\u2019]*$', group[-1]['word']) or
-                      len(wrap_words(candidate, layout)) > layout['max_lines']):
-            groups.append(group)
-            group = []
-        group.append(word)
-    if group:
-        groups.append(group)
+        if block and (word.get('passage_id') != block[-1].get('passage_id') or
+                      time_value(word['start']) - time_value(block[-1]['end']) > time_value(style['phrase_gap']) or
+                      re.search(r'[.!?]["\u201d\u2019]*$', block[-1]['word'])):
+            blocks.append(block)
+            block = []
+        block.append(word)
+    if block:
+        blocks.append(block)
+    groups = []
+    for block in blocks:
+        groups.extend(phrase_groups(block, layout, style))
     return groups
+
+
+def token(word):
+    return word['word'].lower().replace('\u2019', "'").strip('.,!?;:\"\u201c\u201d()')
+
+
+def boundary_cost(words, index):
+    """Generic punctuation/clause hints, never rewriting the recognized words."""
+    if index == len(words):
+        return 0
+    left, right = token(words[index - 1]), token(words[index])
+    following = token(words[index + 1]) if index + 1 < len(words) else ''
+    cost = 0.0
+    if re.search(r'[,;:]["\u201d\u2019]*$', words[index - 1]['word']):
+        cost -= 2.5
+    gap = float(time_value(words[index]['start']) - time_value(words[index - 1]['end']))
+    if gap >= 0.25:
+        cost -= min(3.0, gap * 5)
+    subjects = {"i'm", "i'll", "i've", "we're", "we'll", "we've", "you're", "you'll",
+                "it's", "that's", "there's", "they're", "they'll", "let's", "he's", "she's"}
+    if right in subjects or right in {'i', 'we', 'you', 'they', 'he', 'she'}:
+        cost -= 2.5
+    if right in {'and', 'but', 'so'} and (following in subjects or following in {'i', 'we', 'you', 'they'}):
+        cost -= 2.5
+    if right == 'make' and following == 'sure':
+        cost -= 2.5
+    # Avoid leaving a preposition, determiner, possessive, or auxiliary hanging.
+    if left in {'a', 'an', 'the', 'to', 'of', 'with', 'for', 'in', 'on', 'and', 'or',
+                'but', 'our', 'your', 'my', 'their', 'its', 'is', 'are', 'was', 'were',
+                'will', 'would', 'can', 'could', 'should'} or left in subjects:
+        cost += 6
+    if left in {'make', 'take', 'get', 'find', 'see', 'have'} and right in {'a', 'an', 'the', 'our', 'your', 'my', 'it'}:
+        cost += 4
+    return cost
+
+
+def phrase_groups(words, layout, style):
+    """Choose readable boundaries in O(words * max_words), with size constraints."""
+    count = len(words)
+    costs = [float('inf')] * (count + 1)
+    choices = [None] * count
+    costs[count] = 0
+    target = min(6, layout['max_words'])
+    for start in range(count - 1, -1, -1):
+        for end in range(start + 1, min(count, start + layout['max_words']) + 1):
+            group = words[start:end]
+            if end > start + 1 and (
+                time_value(group[-1]['end']) - time_value(group[0]['start']) > time_value(style['max_duration']) or
+                len(wrap_words(group, layout)) > layout['max_lines']):
+                break
+            length = end - start
+            cost = 1 + 0.10 * (length - target) ** 2 + boundary_cost(words, end) + costs[end]
+            if length == 1 and count > 1:
+                cost += 2.5
+            if cost < costs[start]:
+                costs[start], choices[start] = cost, end
+    result, start = [], 0
+    while start < count:
+        end = choices[start]
+        result.append(words[start:end])
+        start = end
+    return result
 
 
 def source_identity_matches(data, source):
@@ -177,7 +240,10 @@ def analysis_for(source, explicit):
         if not re.fullmatch(r'[0-9a-f]{64}', path.stem):
             continue
         data = json.loads(path.read_text())
-        if source_identity_matches(data, source):
+        settings = data.get('identity', {}).get('settings', {})
+        if (source_identity_matches(data, source) and settings.get('model') == DEFAULT_MODEL and
+                settings.get('language') == DEFAULT_LANGUAGE and settings.get('word_timestamps') is True and
+                settings.get('asr_profile') == ASR_PROFILE):
             return data, str(path)
     process = subprocess.run([sys.executable, str(ROOT / 'analyze_recording.py'), '--source', str(source)],
                              capture_output=True, text=True)
@@ -198,8 +264,30 @@ def normalize_words(rows):
         previous = start
         if not text or start == end:
             continue
-        result.append({'word': text, 'start': xml_time(start), 'end': xml_time(end)})
+        item = {'word': text, 'start': xml_time(start), 'end': xml_time(end)}
+        for key in ('passage_id', 'passage_start', 'passage_end'):
+            if key in row:
+                item[key] = row[key]
+        result.append(item)
     return result
+
+
+def analysis_words(data):
+    rows = [{**{key: segment[key] for key in ('passage_id', 'passage_start', 'passage_end') if key in segment}, **w}
+            for segment in data['segments'] for w in segment.get('words', [])]
+    speech = data.get('speech_passages', [])
+    starts = [time_value(p['start']) for p in speech]
+    # Recognition can share nearby context, but captions still respect detected speech islands.
+    for word in rows:
+        if not speech:
+            break
+        midpoint = (time_value(word['start']) + time_value(word['end'])) / 2
+        previous = max(0, bisect_left(starts, midpoint) - 1)
+        candidates = range(previous, min(len(speech), previous + 2))
+        index = min(candidates, key=lambda i: max(starts[i] - midpoint, midpoint - time_value(speech[i]['end']), 0))
+        p = speech[index]
+        word.update(passage_id=index, passage_start=p['start'], passage_end=p['end'])
+    return rows
 
 
 def words_for_timeline(timeline, explicit, supplied):
@@ -223,7 +311,7 @@ def words_for_timeline(timeline, explicit, supplied):
                 source = media_path(asset)
                 if source not in analyses:
                     data, path = analysis_for(source, explicit)
-                    analyses[source] = index_words(normalize_words([w for s in data['segments'] for w in s.get('words', [])]))
+                    analyses[source] = index_words(normalize_words(analysis_words(data)))
                     used.append(path)
                 rows, midpoints = analyses[source]
                 shift = a + time_value(asset.get('start', '0s')) - time_value(clip.get('start', '0s'))
@@ -239,7 +327,11 @@ def words_for_timeline(timeline, explicit, supplied):
                     if end <= start:
                         end = min(b, start + timeline.frame_duration)
                     if end > start:
-                        words.append({**word, 'start': xml_time(start), 'end': xml_time(end)})
+                        mapped = {**word, 'start': xml_time(start), 'end': xml_time(end)}
+                        if 'passage_end' in word:
+                            mapped['passage_end'] = xml_time(time_value(word['passage_end']) + shift)
+                            mapped['passage_start'] = xml_time(time_value(word['passage_start']) + shift)
+                        words.append(mapped)
         result.append(words)
     return result, used
 
@@ -338,6 +430,9 @@ def add_subtitles(xml, style, explicit=(), supplied=None, replace=False):
             next_start = time_value(groups[i + 1][0]['start']) if i + 1 < len(groups) else clip_end
             end = min(clip_end, next_start, time_value(group[-1]['end']) +
                       round(time_value(style['tail']) / timeline.frame_duration) * timeline.frame_duration)
+            if 'passage_end' in group[-1]:
+                passage_end = time_value(group[-1]['passage_end'])
+                end = min(end, (passage_end // timeline.frame_duration) * timeline.frame_duration)
             if end <= start:
                 continue
             # Do not allow overlapping recognizer word intervals to escape their title.

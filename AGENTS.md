@@ -86,8 +86,10 @@ and `--silence-min` configure detection; they do not remove anything. The cached
 JSON contains timestamped words, optional silence intervals, and source identity.
 Do not use legacy top-level analysis without verifying its source and settings.
 
-The downloaded model is `small.en` and the default language is English. For other
-languages, select a multilingual model with `--model` and a language code or
+The default model is `large-v3-turbo` and the default language is English. The old
+`small.en` model/cache is retained for explicitly requested fast experiments;
+do not silently reuse it for current subtitles. For other
+languages, select a model with `--model` and a language code or
 `--language auto`. Missing models require explicit `--allow-model-download`;
 this downloads model weights, not footage. `--refresh` recomputes matching analysis.
 An optional `--output` writes a copy to a new path.
@@ -173,7 +175,10 @@ To add subtitles to an already edited project without changing its video:
 ```
 
 Both commands reuse analysis automatically if source path, size, mtime and ctime
-match; missing analysis runs the existing local transcriber once per source. No
+match and the cache uses the current default model/language with word timestamps.
+It must also match the current speech-passage transcription profile. Older-model
+or older-profile caches never override that selection merely because they are newer.
+Missing analysis runs the existing local transcriber once per source. No
 model downloads are silently authorized. Explicit caches can be selected with
 repeatable `--subtitle-analysis` (range editor) or `--analysis` (standalone).
 Cache timestamps are file-relative; the generator maps each retained source
@@ -202,10 +207,27 @@ Sizes are converted to the title template's reference canvas, so 4K and 1080p
 keep comparable proportions. Reserve another 15% of usable width for font
 variation, outlines, and background padding. Estimate character widths, wrap
 once, and split phrases that would exceed the line limit. A single unusually
-long word is reduced once to fit the estimate. Stop phrases at sentence endings,
-gaps over 0.65s, clip boundaries, or 3.5s; allow a 0.12s trailing hold without
+long word is reduced once to fit the estimate. Prefer sentence endings, comma/clause
+boundaries, and pauses when partitioning each passage. Penalize breaks after
+articles, prepositions, possessives, and auxiliaries, or between verbs and their
+objects. Word/line/duration limits are constraints, not the first place to split
+a sentence. Never cross detected speech passage boundaries, gaps over 0.65s,
+or clip boundaries. Keep phrases within 3.5s when possible; allow a 0.12s trailing hold without
 overlapping the next title or extending past the clip. These are practical
 heuristics, not a guarantee about fonts or every platform's controls.
+
+Transcription uses the bundled Silero speech detector, then supplies bounded audio
+passages directly to `large-v3-turbo` instead of concatenating distant speech.
+Default detection separates pauses of at least 650ms, uses 400ms boundary padding,
+and caps long speech passages at 14s. The model is loaded once and passages are
+processed in batches of four (`--batch-size` can change this). Nearby passages
+share a recognition window only when their padded gap is at most 1.25s and the
+combined window is at most 22s. Keep the original audio and silence within those
+windows; never splice distant speech together. Detected passage IDs/bounds travel into subtitle
+grouping even when context windows share adjacent audio. This is a single cached
+recognition pass, with no additional alignment model, language model rewrite,
+cloud service, or per-video manual correction loop. Reuse this profile; do not
+change detection/phrase rules for each new recording merely to polish its result.
 
 Style fields: `template` (`subtitle`/`basic`), `mode` (`phrase`/`word`), `animation`,
 `font`, `font_face`, `text_color`, `highlight_color`, `background_color`,
