@@ -1,0 +1,23 @@
+# Local runtime and cached models/analysis
+.venv/
+.cache/
+__pycache__/
+*.py[cod]
+.DS_Store
+:memory:.ses
+
+# Per-project inputs and generated work
+inputs/
+outputs/
+archives/
+*.fcpxml
+*.fcpxmld/
+
+# Source media and disposable analysis audio
+*.mov
+*.MOV
+*.mp4
+*.MP4
+*.m4v
+*.wav
+*.mp3
