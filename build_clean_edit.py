@@ -8,7 +8,8 @@ from pathlib import Path
 import uuid
 import xml.etree.ElementTree as ET
 
-from fcpxml_tools import ROOT, load_timeline, media_path, time_value, xml_time, validate_xml, write_json
+from fcpxml_tools import ROOT, load_timeline, media_path, time_value, xml_time, validate_xml, write_json, serialize_xml
+from subtitle_timing import remap_subtitles
 
 
 def apply_ranges(timeline, decisions, project_name, event_name):
@@ -60,6 +61,8 @@ def apply_ranges(timeline, decisions, project_name, event_name):
             if a >= b:
                 continue
             clip = deepcopy(original)
+            for title in clip.findall('title'):
+                clip.remove(title)
             source_start = time_value(original.get('start', '0s')) + a - clip_start
             duration = b - a
             clip.set('offset', xml_time(cursor))
@@ -83,14 +86,16 @@ def apply_ranges(timeline, decisions, project_name, event_name):
         if covered != end - start:
             raise ValueError('Selected range is not fully covered by the timeline.')
     sequence.set('duration', xml_time(cursor))
-    ET.indent(root, space='    ')
-    xml = '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE fcpxml>\n' + ET.tostring(root, encoding='unicode') + '\n'
+    warnings = set()
+    remap_subtitles(timeline, spine, applied_ranges, warnings)
+    xml = serialize_xml(root)
     format_node = timeline.resources[timeline.sequence.get('format')]
     manifest = {'schema_version': 1, 'input': str(timeline.path), 'project': project_name,
                 'frame_duration': xml_time(timeline.frame_duration),
                 'original_duration': xml_time(timeline.duration), 'edited_duration': xml_time(cursor),
                 'video_format': {k: format_node.get(k) for k in ('width', 'height', 'colorSpace')},
-                'ranges': applied_ranges, 'segments': segments}
+                'ranges': applied_ranges, 'segments': segments, 'warnings': sorted(warnings),
+                'subtitle_titles': len(list(spine.iter('title')))}
     return xml, manifest
 
 
@@ -104,6 +109,11 @@ def main():
     parser.add_argument('--name', help='Revision project name')
     parser.add_argument('--event', default='Agent Edits', help='Destination event name')
     parser.add_argument('--dtd', type=Path, help='Optional explicit matching Apple DTD')
+    parser.add_argument('--subtitles', action='store_true', help='Generate subtitle titles after applying cuts')
+    parser.add_argument('--subtitle-style', type=Path, help='JSON subtitle style overrides')
+    parser.add_argument('--subtitle-analysis', action='append', type=Path, default=[], help='Cached source analysis JSON (repeatable)')
+    parser.add_argument('--subtitle-words', type=Path, help='Word JSON in the edited output timeline coordinates; bypass transcription')
+    parser.add_argument('--subtitle-replace', action='store_true', help='Replace existing subtitle titles when generating')
     args = parser.parse_args()
     try:
         timeline = load_timeline(args.input, args.project)
@@ -122,13 +132,25 @@ def main():
         decisions = json.loads(args.decisions.read_text())
         name = args.name or f'{timeline.project.get("name", "Project")} - Edit {token}'
         xml, manifest = apply_ranges(timeline, decisions, name, args.event)
+        if args.subtitles:
+            from generate_subtitles import add_subtitles, read_style
+            xml, subtitle_report = add_subtitles(xml, read_style(args.subtitle_style),
+                args.subtitle_analysis,
+                supplied=json.loads(args.subtitle_words.read_text()) if args.subtitle_words else None,
+                replace=args.subtitle_replace)
+            manifest['subtitles'] = subtitle_report
+            manifest['subtitle_titles'] = subtitle_report['titles']
+            manifest['warnings'] += subtitle_report['warnings']
+        elif args.subtitle_style or args.subtitle_analysis or args.subtitle_replace or args.subtitle_words:
+            raise ValueError('Subtitle options require --subtitles.')
         manifest['validation'] = validate_xml(xml, timeline.root.get('version', ''), args.dtd)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(xml)
         write_json(manifest_path, manifest)
         print(json.dumps({'output': str(output), 'manifest': str(manifest_path), 'project': name,
                           'duration_seconds': float(time_value(manifest['edited_duration'])),
-                          'segments': len(manifest['segments']), 'validation': manifest['validation']}, indent=2))
+                          'segments': len(manifest['segments']), 'validation': manifest['validation'],
+                          'subtitles': manifest.get('subtitles'), 'warnings': manifest['warnings']}, indent=2))
     except (ValueError, OSError, ET.ParseError, KeyError, TypeError) as exc:
         parser.exit(2, f'Error: {exc}\n')
 

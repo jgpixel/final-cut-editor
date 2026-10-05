@@ -39,6 +39,16 @@ def write_json(path, data):
     Path(path).write_text(json.dumps(data, indent=2) + '\n')
 
 
+def serialize_xml(root):
+    # ElementTree.indent inserts visible whitespace into mixed-content title text.
+    # Format the document, then restore those text containers byte-for-byte.
+    content = [(node, node.text, node.tail) for text in root.iter('text') for node in text.iter()]
+    ET.indent(root, space='    ')
+    for node, text, tail in content:
+        node.text, node.tail = text, tail
+    return '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE fcpxml>\n' + ET.tostring(root, encoding='unicode') + '\n'
+
+
 @dataclass
 class Timeline:
     path: Path
@@ -73,6 +83,7 @@ class Timeline:
                 'supported': not errors, 'limitations': errors, 'clips': clips}
 
     def check_supported(self):
+        from subtitle_timing import check_subtitle, connected_subtitles
         cursor = Fraction(0)
         for start, end, clip in self.spans:
             if clip.tag not in ('asset-clip', 'gap'):
@@ -83,8 +94,10 @@ class Timeline:
                 raise ValueError('Timeline clip boundaries are not on project frames.')
             if clip.get('lane', '0') != '0':
                 raise ValueError('Connected clips are not supported by this range editor.')
-            if any(child.tag not in ('note', 'metadata') for child in clip):
+            if any(child.tag not in ('note', 'metadata', 'title') for child in clip):
                 raise ValueError('Effects, markers, connected clips, and nested timing require a different edit path.')
+            for title in clip.findall('title'):
+                check_subtitle(title, self.resources, self.frame_duration)
             if clip.get('audioStart') is not None or clip.get('audioDuration') is not None:
                 raise ValueError('Split audio/video edits are not supported.')
             if clip.tag == 'asset-clip':
@@ -101,6 +114,9 @@ class Timeline:
             cursor = end
         if cursor != self.duration:
             raise ValueError('Sequence duration does not match its primary storyline.')
+        for start, end, _ in connected_subtitles(self):
+            if start < 0 or end > self.duration or start / self.frame_duration % 1:
+                raise ValueError('Subtitle timing is outside the project or not frame aligned.')
 
 
 def load_timeline(path, project_name=None):

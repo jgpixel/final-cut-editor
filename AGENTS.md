@@ -43,11 +43,15 @@ Use `--help` for options. Reuse installed software and downloaded models.
   MP4. It uses project frame rate and aspect ratio, supports multiple sources,
   and detects HLG/PQ for SDR review conversion. It does not change the XML.
 - `fcpxml_tools.py`: shared XML inspection, rational timing, and DTD validation.
+- `generate_subtitles.py`: adds editable connected title subtitles, reuses source
+  analysis or transcribes missing sources locally, and applies a saved style.
+- `subtitle_timing.py`: preserves and remaps recognized subtitle titles through
+  cuts and reordering, using embedded word timing when available.
 
 The range editor supports contiguous primary storylines made of simple asset
 clips and explicit gaps, with multiple recordings and nonzero source timecodes.
-It preserves clip attributes, notes, metadata, and resource definitions. It
-rejects effects, markers, transitions, connected clips, compound/multicam clips,
+It preserves clip attributes, notes, metadata, resource definitions, and recognized
+connected subtitle titles. It rejects effects, markers, transitions, other connected clips, compound/multicam clips,
 retiming, split audio/video edits, and overlapping timelines before writing an
 edit. Use inspection to identify these limits. Do not flatten or discard those
 structures to force a project through this tool; explain the limitation and use
@@ -145,6 +149,104 @@ keep each job's results together; choose a new revision filename for each edit.
   inspect relevant visuals. Generate separate revisions when requested.
 - **Revise an edit:** reuse unchanged source analysis and adjust the decision file.
   Reapply to the appropriate input export without retranscribing unchanged media.
+
+## Generate and preserve subtitles
+
+Subtitles here are editable **title clips**, not closed-caption tracks. The local
+transcription tool supplies their words/timing; Final Cut renders the title template.
+Generate subtitles only when requested. For cuts plus subtitles in one delivery,
+append `--subtitles` to the existing editing command:
+
+```sh
+.venv/bin/python build_clean_edit.py \
+  --input "/path/to/project.fcpxmld" \
+  --decisions "/path/to/decisions.json" \
+  --subtitles --output "outputs/<job>/rough-cut-subtitles-01.fcpxml"
+```
+
+To add subtitles to an already edited project without changing its video:
+
+```sh
+.venv/bin/python generate_subtitles.py \
+  --input "/path/to/edited.fcpxml" \
+  --output "outputs/<job>/subtitles-01.fcpxml"
+```
+
+Both commands reuse analysis automatically if source path, size, mtime and ctime
+match; missing analysis runs the existing local transcriber once per source. No
+model downloads are silently authorized. Explicit caches can be selected with
+repeatable `--subtitle-analysis` (range editor) or `--analysis` (standalone).
+Cache timestamps are file-relative; the generator maps each retained source
+excerpt, including reordered/repeated excerpts and nonzero source timecodes.
+Disabled/video-only clips and gaps get no generated subtitles.
+
+Use `subtitle_styles/default.json` as the reusable default. Request-specific
+overrides go in a new JSON file, passed with `--subtitle-style` or standalone
+`--style`; they merge over the default preset. Do not change the global preset
+merely to configure one job. Included alternatives are `subtitle_styles/word.json`
+(one word replaces the previous word) and `subtitle_styles/basic.json` (plain
+Basic Title without a background). Default template is Apple's built-in Subtitle,
+available in Final Cut 12.3; Basic Title is the alternative for older versions.
+
+**One-pass layout rules, applied automatically:**
+
+| Setting | Horizontal / square | Vertical |
+| --- | --- | --- |
+| Left/right margin | 8% each | 12% each |
+| Bottom clearance | 10% of height | 22% of height |
+| Font size | 4.5% of shorter dimension | 5.5% of shorter dimension |
+| Maximum words per phrase | 8 | 5 |
+| Maximum lines | 2 | 2 |
+
+Sizes are converted to the title template's reference canvas, so 4K and 1080p
+keep comparable proportions. Reserve another 15% of usable width for font
+variation, outlines, and background padding. Estimate character widths, wrap
+once, and split phrases that would exceed the line limit. A single unusually
+long word is reduced once to fit the estimate. Stop phrases at sentence endings,
+gaps over 0.65s, clip boundaries, or 3.5s; allow a 0.12s trailing hold without
+overlapping the next title or extending past the clip. These are practical
+heuristics, not a guarantee about fonts or every platform's controls.
+
+Style fields: `template` (`subtitle`/`basic`), `mode` (`phrase`/`word`), `animation`,
+`font`, `font_face`, `text_color`, `highlight_color`, `background_color`,
+`background_opacity` (0–1), `outline_color`, `outline_width`, `font_size` (target
+project pixels), `side_margin`, `bottom_margin` (fractions), `max_words`,
+`max_lines` (1–3), `max_duration`, `phrase_gap`, and `tail`. Colors are
+`#RRGGBB` or `#RRGGBBAA`. Default is bold white phrase text with a translucent
+black background, black outline, and no animation. Native Subtitle animations
+`fade`, `scale`, `highlight`, and `fill` are selectable; their sequence follows
+template duration, not exact word timestamps. Precise cumulative word reveals
+and large mixed-font arrangements belong to the next custom-text stage.
+
+For corrected words without retranscription, optionally provide JSON with
+`coordinate_space: "timeline"` and `words: [{"word": "Hello", "start": 1,
+"end": 1.4}]`, using standalone `--words` or range-editor `--subtitle-words`.
+For the range editor these times refer to the **edited output timeline**.
+
+When editing an existing subtitled project, omit `--subtitles`: the range editor
+preserves and remaps identifiable subtitle titles automatically. It recognizes
+embedded workflow timing, a subtitle role, or Apple's Subtitle template. Other
+connected graphics, nested title structures, filters, and keyframed titles remain
+unsupported. A title can cross primary-clip boundaries; its intersection with
+each retained passage is connected to the appropriate output clip.
+
+Generated titles store word timing and text character ranges in their clip notes.
+Keep those notes when exporting from Final Cut. At cuts, word midpoints determine
+which words survive; remaining text keeps its style runs. If notes are absent
+(including ordinary Final Cut-generated subtitles) or text was changed by a human,
+preserve text/style and trim timing, report partial titles for human review, and
+never overwrite human wording with stale timing. Do not claim automatic word-level
+text trimming for such titles. Generating over existing subtitles requires explicit
+`--subtitle-replace` or standalone `--replace`; otherwise it stops to avoid duplicates.
+
+**Subtitle delivery is deliberately one pass.** Use the preset and heuristics,
+run cheap timing/XML validation, and deliver. Do not take screenshots, render
+previews, inspect every phrase visually, add a refinement loop, or perform a
+second transcription/review pass to perfect wording, spacing, or synchronization.
+The user reviews and adjusts the result in Final Cut. Only fix technical failures
+that prevent valid output. Report material limitations briefly. DTD checks do not
+confirm template rendering or a successful Final Cut import. The preview script
+does not render title graphics and refuses manifests containing subtitles.
 
 ## Validate and deliver
 
