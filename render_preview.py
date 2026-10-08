@@ -30,8 +30,6 @@ def main():
         edit = json.loads(args.manifest.read_text())
         if edit.get('schema_version') != 1 or not edit.get('segments'):
             raise ValueError('Use a manifest from the current XML editor, not a legacy example manifest.')
-        if edit.get('subtitle_titles', 0):
-            raise ValueError('This preview renderer does not render title/subtitle graphics. Preview or export the subtitled XML in Final Cut.')
         frame_duration = time_value(edit['frame_duration'])
         fps = 1 / frame_duration
         width, height = int(edit['video_format']['width']), int(edit['video_format']['height'])

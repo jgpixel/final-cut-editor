@@ -76,8 +76,23 @@ class RangeEditingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'coordinate_space'):
             apply_ranges(self.timeline(), {'ranges': [{'start': 0, 'end': 1}]}, 'Edit', 'Edits')
 
+    def test_validation_rejects_subframe_source_start_despite_valid_timeline(self):
+        clip = self.root.find('.//asset-clip')
+        clip.set('start', xml_time(self.origin + Fraction(8, 3) * self.fd))
+        xml, _ = self.edit([{'start': 0, 'end': xml_time(4 * self.fd)}])
+        with self.assertRaisesRegex(ValueError, 'Off-frame source start'):
+            validate_xml(xml, '1.14')
+        root = ET.fromstring(xml)
+        root.find('.//asset-clip').set('start', xml_time(self.origin + 3 * self.fd))
+        self.assertIn('matching Apple DTD', validate_xml(ET.tostring(root, encoding='unicode'), '1.14'))
+
     def test_nested_clip_rejected_instead_of_discarded(self):
         ET.SubElement(self.root.find('.//asset-clip'), 'asset-clip', ref='second', duration='1s')
+        with self.assertRaisesRegex(ValueError, 'nested timing'):
+            self.edit([{'start': 0, 'end': xml_time(4 * self.fd)}])
+
+    def test_connected_title_rejected_instead_of_discarded(self):
+        ET.SubElement(self.root.find('.//asset-clip'), 'title', duration='1s')
         with self.assertRaisesRegex(ValueError, 'nested timing'):
             self.edit([{'start': 0, 'end': xml_time(4 * self.fd)}])
 

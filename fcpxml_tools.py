@@ -39,16 +39,6 @@ def write_json(path, data):
     Path(path).write_text(json.dumps(data, indent=2) + '\n')
 
 
-def serialize_xml(root):
-    # ElementTree.indent inserts visible whitespace into mixed-content title text.
-    # Format the document, then restore those text containers byte-for-byte.
-    content = [(node, node.text, node.tail) for text in root.iter('text') for node in text.iter()]
-    ET.indent(root, space='    ')
-    for node, text, tail in content:
-        node.text, node.tail = text, tail
-    return '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE fcpxml>\n' + ET.tostring(root, encoding='unicode') + '\n'
-
-
 @dataclass
 class Timeline:
     path: Path
@@ -83,7 +73,6 @@ class Timeline:
                 'supported': not errors, 'limitations': errors, 'clips': clips}
 
     def check_supported(self):
-        from subtitle_timing import check_subtitle, connected_subtitles
         cursor = Fraction(0)
         for start, end, clip in self.spans:
             if clip.tag not in ('asset-clip', 'gap'):
@@ -94,10 +83,8 @@ class Timeline:
                 raise ValueError('Timeline clip boundaries are not on project frames.')
             if clip.get('lane', '0') != '0':
                 raise ValueError('Connected clips are not supported by this range editor.')
-            if any(child.tag not in ('note', 'metadata', 'title') for child in clip):
+            if any(child.tag not in ('note', 'metadata') for child in clip):
                 raise ValueError('Effects, markers, connected clips, and nested timing require a different edit path.')
-            for title in clip.findall('title'):
-                check_subtitle(title, self.resources, self.frame_duration)
             if clip.get('audioStart') is not None or clip.get('audioDuration') is not None:
                 raise ValueError('Split audio/video edits are not supported.')
             if clip.tag == 'asset-clip':
@@ -114,9 +101,6 @@ class Timeline:
             cursor = end
         if cursor != self.duration:
             raise ValueError('Sequence duration does not match its primary storyline.')
-        for start, end, _ in connected_subtitles(self):
-            if start < 0 or end > self.duration or start / self.frame_duration % 1:
-                raise ValueError('Subtitle timing is outside the project or not frame aligned.')
 
 
 def load_timeline(path, project_name=None):
@@ -161,8 +145,35 @@ def load_timeline(path, project_name=None):
     return Timeline(path, root, project, sequence, resources, frame_duration, duration, spans)
 
 
+def check_edit_frame_alignment(root):
+    """Catch import repair gaps that the XML DTD cannot detect."""
+    resources = {r.get('id'): r for r in root.find('resources')}
+    for sequence in root.findall('.//project/sequence'):
+        frame = time_value(resources[sequence.get('format')].get('frameDuration'))
+        spine = sequence.find('spine')
+        if spine is None:
+            continue
+        for clip in spine:
+            if clip.tag not in ('asset-clip', 'gap'):
+                continue
+            for key in ('offset', 'duration'):
+                if clip.get(key) is not None and time_value(clip.get(key)) / frame % 1:
+                    raise ValueError(f'Off-frame primary clip {key}; Final Cut may insert repair gaps.')
+            if clip.tag == 'asset-clip':
+                asset = resources.get(clip.get('ref'))
+                if asset is None or asset.tag != 'asset':
+                    continue
+                source_format = resources.get(clip.get('format') or asset.get('format'))
+                # Mixed-rate media needs rate-conform handling; do not assume its grid is the project grid.
+                if source_format is not None and time_value(source_format.get('frameDuration')) == frame:
+                    origin = time_value(asset.get('start', '0s'))
+                    if (time_value(clip.get('start', '0s')) - origin) / frame % 1:
+                        raise ValueError('Off-frame source start; align matching-rate source cuts before exporting.')
+
+
 def validate_xml(xml, version, dtd_path=None):
     """Validate before publishing outputs, when a matching DTD is available."""
+    check_edit_frame_alignment(ET.fromstring(xml))
     dtd = Path(dtd_path) if dtd_path else DTD_DIR / f'FCPXMLv{version.replace(".", "_")}.dtd'
     if not dtd.is_file() or not shutil.which('xmllint'):
         if dtd_path:
