@@ -287,6 +287,26 @@ class SubtitleTests(unittest.TestCase):
         _, report = add_subtitles(muted, style, supplied=self.words)
         self.assertEqual(report['titles'], 1)
 
+    def test_caps_preset_preserves_word_timing_offsets_and_outline(self):
+        style = read_style(Path(__file__).parent / 'subtitle_styles' / 'word-caps-black.json')
+        words = {'coordinate_space': 'timeline', 'words': [
+            {'word': 'Straße', 'start': 1, 'end': 1.2},
+            {'word': 'today.', 'start': 2.6, 'end': 2.8}]}
+        original = json.dumps(words)
+        xml, report = add_subtitles(self.xml, style, supplied=words)
+        titles = connected_subtitles(self.timeline(xml))
+        self.assertEqual([title_text(t[2]) for t in titles], ['STRASSE', 'TODAY.'])
+        self.assertEqual([t[0] for t in titles], [Fraction(1), Fraction(13, 5)])
+        self.assertLess(titles[0][1], titles[1][0])
+        first = titles[0][2]
+        self.assertEqual(subtitle_data(first)['words'][0]['char_end'], 7)
+        self.assertEqual(first.find('text-style-def/text-style').get('strokeWidth'), '1.5')
+        self.assertEqual(first.find('text-style-def/text-style').get('strokeColor'), '0 0 0 1')
+        self.assertEqual(first.find('param[@name="Background Opacity"]').get('value'), '1')
+        self.assertEqual(json.dumps(words), original)
+        self.assertEqual(report['style']['text_case'], 'uppercase')
+        self.assertIn('matching Apple DTD', validate_xml(xml, '1.14'))
+
     def test_generation_requires_explicit_replacement_and_rejects_unrelated_titles(self):
         xml, _ = self.generated()
         with self.assertRaisesRegex(ValueError, 'already has subtitles'):

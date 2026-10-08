@@ -193,6 +193,20 @@ merely to configure one job. Included alternatives are `subtitle_styles/word.jso
 Basic Title without a background). Default template is Apple's built-in Subtitle,
 available in Final Cut 12.3; Basic Title is the alternative for older versions.
 
+`subtitle_styles/word-caps-black.json` is a reusable one-word preset: all caps,
+bold white text, and an opaque black background behind each word. `text_case`
+accepts `original` (default) or `uppercase`. Apply casing before wrapping/sizing
+and creating word character offsets; preserve original cached transcription and
+timestamps. Text strokes are already reusable through `outline_color` and
+`outline_width`; set width to 0 to disable the stroke. Background opacity 1 is
+solid and 0 is invisible.
+
+Word mode creates a separate editable title at each recognized word's mapped,
+frame-snapped timestamp. It replaces the previous word, using the recognized word
+end plus the configured `tail`, bounded by the next word, clip, and speech passage.
+It does not use a timer to distribute words across a phrase. Native phrase
+animations are a separate feature and do not provide exact recognized-word reveal.
+
 **One-pass layout rules, applied automatically:**
 
 | Setting | Horizontal / square | Vertical |
@@ -277,6 +291,15 @@ range durations, coverage, and total duration. It validates against the matching
 installed Apple FCPXML DTD when available and reports validation status. An
 explicit `--dtd` can select a matching schema. Do not claim schema validation when
 only timing checks ran.
+
+Also check retained source starts, not just output offsets and durations. For
+matching source/project frame rates, generated source starts must be whole source
+frames relative to the asset start. An exported input can contain a fractional
+source start; copying that phase into every new cut can cause Final Cut to insert
+repair gaps on import. `validate_xml` now rejects this case even when the DTD
+passes. A targeted edit path must snap those source starts to the correct source
+grid, preserve the chosen output durations, and record the small timing adjustment.
+Do not apply this matching-rate rule blindly to mixed-rate or retimed media.
 
 Final Cut is installed at `/Applications/Final Cut Pro Creator Studio.app`, bundle
 ID `com.apple.FinalCutApp`. DTDs are under that app's

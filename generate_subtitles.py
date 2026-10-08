@@ -21,7 +21,7 @@ from analyze_recording import DEFAULT_MODEL, DEFAULT_LANGUAGE, ASR_PROFILE
 SUBTITLE_UID = '.../Titles.localized/Subtitles.localized/Subtitle.localized/Subtitle.moti'
 BASIC_UID = '.../Titles.localized/Bumper:Opener.localized/Basic Title.localized/Basic Title.moti'
 DEFAULTS = {
-    'template': 'subtitle', 'mode': 'phrase', 'animation': 'none',
+    'template': 'subtitle', 'mode': 'phrase', 'animation': 'none', 'text_case': 'original',
     'font': 'Helvetica Neue', 'font_face': 'Bold', 'text_color': '#FFFFFF',
     'highlight_color': '#FFE14A', 'background_color': '#000000',
     'background_opacity': 0.6, 'outline_color': '#000000', 'outline_width': 1.5,
@@ -51,6 +51,8 @@ def read_style(path=None):
         raise ValueError('Supported templates: subtitle/basic; modes: phrase/word.')
     if result['animation'] not in ('none', 'fade', 'scale', 'highlight', 'fill'):
         raise ValueError('Unknown native subtitle animation.')
+    if result['text_case'] not in ('original', 'uppercase'):
+        raise ValueError('Supported text_case values: original/uppercase.')
     if result['template'] == 'basic' and (result['animation'] != 'none' or result['background_opacity']):
         raise ValueError('Basic Title requires animation: none and background_opacity: 0; use Subtitle for backgrounds.')
     for key in ('text_color', 'highlight_color', 'background_color', 'outline_color'):
@@ -416,6 +418,10 @@ def add_subtitles(xml, style, explicit=(), supplied=None, replace=False):
     width, height = int(format_node.get('width', '0')), int(format_node.get('height', '0'))
     layout = layout_for(width, height, style)
     words_by_clip, used = words_for_timeline(timeline, explicit, supplied)
+    # Transform display words before layout and character-offset metadata; keep cache/timing intact.
+    if style['text_case'] == 'uppercase':
+        words_by_clip = [[{**word, 'word': word['word'].upper()} for word in words]
+                         for words in words_by_clip]
     resources = timeline.root.find('resources')
     unique = uuid.uuid4().hex[:12]
     effect_id = 'fce_subtitle_effect_' + unique
